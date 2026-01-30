@@ -15,7 +15,7 @@ from http.server import HTTPServer, BaseHTTPRequestHandler
 
 # ================= 配置区域 (请修改这里) =================
 # 【TODO: 请将 user123/my-doc-reader 替换为你真实的新仓库地址】
-REPO_PATH = "user123/my-doc-reader" 
+REPO_PATH = "wh1813/my-doc-reader" 
 
 # 1. 网址列表的 GitHub Raw 地址
 REMOTE_URLS_PATH = f"https://raw.githubusercontent.com/{REPO_PATH}/main/urls.txt"
@@ -191,4 +191,5 @@ if __name__ == "__main__":
     while True:
         try: run_automation()
         except: pass
+
         time.sleep(600)
