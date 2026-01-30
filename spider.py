@@ -3,132 +3,165 @@ import time
 import logging
 import undetected_chromedriver as uc
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
-# 设置日志格式
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
 def get_driver():
-    """启动浏览器配置"""
     options = uc.ChromeOptions()
-    # 在 GitHub Actions 或服务器后台运行时必须开启 headless
-    options.add_argument("--headless=new") 
+    options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
-    
-    # 保持与 main.py 一致的驱动版本逻辑
+    # 保持与 main.py 一致的版本策略
     driver = uc.Chrome(options=options, version_main=144, use_subprocess=True)
     return driver
 
-def crawl_book118_user_center(driver):
-    target_urls = []
-    base_domain = "https://max.book118.com" # 用于补全相对路径
+# ==================== Book118 逻辑 ====================
+def crawl_book118(driver):
+    urls = []
+    base_domain = "https://max.book118.com"
+    cookie_str = os.environ.get("COOKIE_BOOK118")
     
+    if not cookie_str:
+        logging.warning("⚠️ [Book118] 未配置 COOKIE_BOOK118，跳过")
+        return []
+
     try:
-        logging.info(">>> [爬虫] 正在初始化 Book118...")
+        logging.info(">>> [Book118] 开始抓取...")
         driver.get("https://max.book118.com/")
-        
-        # 1. 注入 Cookie (从环境变量获取)
-        cookie_str = os.environ.get("COOKIE_BOOK118")
-        if not cookie_str:
-            logging.error("❌ 未检测到 Cookie，请检查 GitHub Secrets (COOKIE_BOOK118)！")
-            return []
-            
-        logging.info("正在注入登录凭证...")
         driver.delete_all_cookies()
         for item in cookie_str.split(';'):
             if '=' in item:
-                key_val = item.strip().split('=', 1)
-                if len(key_val) == 2:
-                    driver.add_cookie({'name': key_val[0], 'value': key_val[1]})
+                k, v = item.strip().split('=', 1)
+                driver.add_cookie({'name': k.strip(), 'value': v.strip()})
         
-        # 2. 跳转到文档管理后台
-        user_center_url = "https://max.book118.com/user_center/doc_manage" 
-        logging.info(f"正在跳转后台: {user_center_url}")
-        driver.get(user_center_url)
-        time.sleep(5) # 等待页面加载
-        
-        # 简单检查是否登录成功
-        if "login" in driver.current_url:
-            logging.error("❌ 登录失败，Cookie 可能已过期，请重新获取！")
-            return []
+        target_url = "https://max.book118.com/user_center_v1/doc/index/index.html#audited"
+        driver.get(target_url)
+        time.sleep(5)
 
-        # 3. 循环爬取前 5 页 (可根据需要修改范围)
         for page in range(1, 6):
-            logging.info(f"--- 正在分析第 {page} 页 ---")
-            
+            logging.info(f"   正在分析第 {page} 页...")
+            try:
+                WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "tr")))
+            except: pass
+
             rows = driver.find_elements(By.TAG_NAME, "tr")
-            found_count = 0
-            
             for row in rows:
                 try:
-                    # --- A. 获取点击量 ---
+                    # 获取点击量
                     try:
-                        views_element = row.find_element(By.CSS_SELECTOR, "td.col-click")
-                        views_text = views_element.text.strip()
-                    except:
-                        continue # 跳过非文档行
-                    
-                    # 统一转换为数字
-                    views = 0
-                    if "万" in views_text:
-                        views = float(views_text.replace("万", "")) * 10000
-                    elif views_text.isdigit():
-                        views = int(views_text)
-                    else:
-                        continue 
+                        views_text = row.find_element(By.CSS_SELECTOR, "td.col-click").text.strip()
+                        if "万" in views_text:
+                            views = float(views_text.replace("万", "")) * 10000
+                        else:
+                            views = int(views_text)
+                    except: continue
 
-                    # --- B. 筛选条件：点击量 < 15 ---
                     if views < 15:
-                        # --- C. 获取链接 ---
-                        title_elem = row.find_element(By.CSS_SELECTOR, "td.col-title a.title")
-                        link_href = title_elem.get_attribute("href")
-                        doc_title = title_elem.get_attribute("title") or "无标题"
-                        
-                        # 补全链接
-                        if link_href and not link_href.startswith("http"):
-                            link_href = base_domain + link_href
-                        
-                        if link_href:
-                            target_urls.append(link_href)
-                            logging.info(f"✅ 捕获: [{views}次] {doc_title}")
-                            found_count += 1
-                            
-                except Exception:
-                    continue 
-            
-            if found_count == 0:
-                logging.info("本页没有符合条件的低频文档")
-            
-            # --- D. 翻页 ---
-            if page < 5:
-                next_url = f"{user_center_url}?page={page+1}"
-                driver.get(next_url)
-                time.sleep(3)
+                        link_elm = row.find_element(By.CSS_SELECTOR, "td.col-title a")
+                        link = link_elm.get_attribute("href")
+                        if link and "http" not in link: link = base_domain + link
+                        if link: urls.append(link)
+                except: continue
+
+            # 翻页
+            try:
+                next_btn = driver.find_element(By.XPATH, "//a[contains(text(), '下一页')]")
+                href = next_btn.get_attribute("href")
+                if not href or "javascript" in href: break
+                driver.execute_script("arguments[0].click();", next_btn)
+                time.sleep(4)
+            except: break
 
     except Exception as e:
-        logging.error(f"❌ 运行出错: {e}")
-
-    return target_urls
-
-def save_urls(urls):
-    if not urls:
-        logging.info("本次没有抓取到链接，不更新文件。")
-        return
+        logging.error(f"❌ [Book118] 出错: {e}")
     
-    logging.info(f"正在保存 {len(urls)} 个链接到 urls.txt...")
-    # 覆盖写入 urls.txt
-    with open("urls.txt", "w", encoding="utf-8") as f:
-        for url in urls:
-            f.write(url + "\n")
-    logging.info("🎉 保存成功！")
+    return urls
 
+# ==================== RenrenDoc 逻辑 (支持多账号) ====================
+def crawl_renrendoc_single(driver, cookie_name, cookie_value):
+    """抓取单个人人账号的逻辑"""
+    urls = []
+    if not cookie_value: return []
+    
+    logging.info(f">>> [{cookie_name}] 开始抓取...")
+    try:
+        driver.get("https://www.renrendoc.com/")
+        driver.delete_all_cookies()
+        for item in cookie_value.split(';'):
+            if '=' in item:
+                k, v = item.strip().split('=', 1)
+                driver.add_cookie({'name': k.strip(), 'value': v.strip()})
+
+        driver.get("https://www.renrendoc.com/renrendoc_v1/MCBookList/published.html")
+        time.sleep(5)
+
+        for page in range(1, 6):
+            logging.info(f"   [{cookie_name}] 分析第 {page} 页...")
+            
+            # 通用链接提取
+            links = driver.find_elements(By.TAG_NAME, "a")
+            count = 0
+            for link in links:
+                try:
+                    href = link.get_attribute("href")
+                    if href and "renrendoc.com/p-" in href:
+                        urls.append(href)
+                        count += 1
+                except: continue
+            
+            # 翻页
+            try:
+                next_btn = driver.find_element(By.XPATH, "//a[contains(@class, 'paginator') and contains(text(), '下一页')]")
+                driver.execute_script("arguments[0].click();", next_btn)
+                time.sleep(4)
+            except: 
+                logging.info(f"   [{cookie_name}] 翻页结束")
+                break
+    except Exception as e:
+        logging.error(f"❌ [{cookie_name}] 出错: {e}")
+    
+    return urls
+
+def crawl_renrendoc_all(driver):
+    all_renren_urls = []
+    
+    # 遍历所有可能的人人 Cookie
+    # 你可以在 Secrets 里配 COOKIE_RENREN1, COOKIE_RENREN2, ...
+    renren_keys = ["COOKIE_RENREN1", "COOKIE_RENREN2"]
+    
+    for key in renren_keys:
+        val = os.environ.get(key)
+        if val:
+            all_renren_urls.extend(crawl_renrendoc_single(driver, key, val))
+        else:
+            logging.info(f"ℹ️ {key} 未配置，跳过")
+            
+    return all_renren_urls
+
+# ==================== 主程序 ====================
 if __name__ == "__main__":
     driver = get_driver()
     if driver:
-        urls = crawl_book118_user_center(driver)
-        save_urls(urls)
-        try:
-            driver.quit()
-        except:
-            pass
+        final_urls = []
+        
+        # 1. 抓取 Book118
+        final_urls.extend(crawl_book118(driver))
+        
+        # 2. 抓取 Renren (所有账号)
+        final_urls.extend(crawl_renrendoc_all(driver))
+        
+        # 3. 去重并保存
+        final_urls = list(set(final_urls))
+        if final_urls:
+            with open("urls.txt", "w", encoding="utf-8") as f:
+                for url in final_urls:
+                    f.write(url + "\n")
+            logging.info(f"🎉 抓取完成！共更新 {len(final_urls)} 个链接")
+        else:
+            logging.info("⚠️ 本次未抓取到任何链接")
+            
+        try: driver.quit()
+        except: pass
