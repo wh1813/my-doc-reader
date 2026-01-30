@@ -1,1 +1,38 @@
+name: Auto Crawl and Update
 
+on:
+  schedule:
+    # 每天北京时间 08:00 (UTC 00:00) 自动运行
+    - cron: '0 0 * * *'
+  # 允许手动触发
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  crawl-and-update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install Dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Spider
+        env:
+          # 必须在 Settings -> Secrets 中设置 COOKIE_BOOK118
+          COOKIE_BOOK118: ${{ secrets.COOKIE_BOOK118 }}
+        run: python spider.py
+
+      - name: Commit Updated URLs
+        uses: stefanzweifel/git-auto-commit-action@v4
+        with:
+          commit_message: "Auto-update urls.txt from spider"
+          file_pattern: urls.txt
