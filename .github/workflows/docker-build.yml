@@ -27,6 +27,6 @@ jobs:
         with:
           context: .
           push: true
-          # 【关键配置】使用 Secret 变量动态生成镜像名
+          # 【关键配置】使用Secret变量动态生成镜像名
           # 结果类似于：loko219/web-bot:latest
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/web-bot:latest
