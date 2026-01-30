@@ -3,6 +3,8 @@ name: Build and Push Docker Image
 on:
   push:
     branches: [ "main" ]
+    # 【关键配置】忽略 urls.txt 的变动
+    # 这样爬虫每天更新 urls.txt 时，不会触发 Docker 构建，节省资源
     paths-ignore:
       - 'urls.txt'
       - 'README.md'
@@ -25,5 +27,6 @@ jobs:
         with:
           context: .
           push: true
-          # 动态引用用户名
+          # 【关键配置】使用 Secret 变量动态生成镜像名
+          # 结果类似于：loko219/web-bot:latest
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/web-bot:latest
