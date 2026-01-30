@@ -3,7 +3,6 @@ name: Build and Push Docker Image
 on:
   push:
     branches: [ "main" ]
-    # 忽略 urls.txt 变动，防止爬虫运行完重复构建镜像
     paths-ignore:
       - 'urls.txt'
       - 'README.md'
@@ -26,5 +25,5 @@ jobs:
         with:
           context: .
           push: true
-          # 【优化】使用 secret 变量，更安全
+          # 动态引用用户名
           tags: ${{ secrets.DOCKERHUB_USERNAME }}/web-bot:latest
