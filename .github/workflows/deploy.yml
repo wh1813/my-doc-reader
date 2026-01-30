@@ -1,0 +1,62 @@
+name: Auto Deploy to Server
+
+on:
+  # 选项1：代码推送到 main 分支时自动部署（可选）
+  # push:
+  #   branches: [ "main" ]
+  
+  # 选项2：手动点击按钮触发（推荐先用这个测试）
+  workflow_dispatch:
+
+  # 选项3：当构建镜像完成后自动触发（最完美流程）
+  workflow_run:
+    workflows: ["Build and Push Docker Image"]
+    types:
+      - completed
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    # 只有当上一个构建任务成功时才运行（针对 workflow_run）
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    
+    steps:
+      - name: Deploy to ClawCloud via SSH
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.HOST_IP }}
+          username: root
+          password: ${{ secrets.HOST_PASSWORD }}
+          # 端口默认22，如果你的服务器改了端口，加一行 port: 你的端口
+          
+          # 【关键】把 Secrets 里的 Cookie 传递给 SSH 环境
+          envs: COOKIE_BOOK118,COOKIE_RENREN1,COOKIE_RENREN2,DOCKERHUB_USERNAME
+          
+          # 具体的执行脚本
+          script: |
+            # 1. 停止并删除旧容器
+            echo "Stopping old container..."
+            docker stop my-bot || true
+            docker rm my-bot || true
+            
+            # 2. 拉取最新镜像
+            echo "Pulling latest image..."
+            # 这里写死了 loko219，你也可以用变量
+            docker pull loko219/web-bot:latest
+            
+            # 3. 启动新容器（自动注入 Cookie）
+            echo "Starting new container..."
+            docker run -d \
+              --name my-bot \
+              --restart always \
+              -e COOKIE_BOOK118="$COOKIE_BOOK118" \
+              -e COOKIE_RENREN1="$COOKIE_RENREN1" \
+              -e COOKIE_RENREN2="$COOKIE_RENREN2" \
+              loko219/web-bot:latest
+              
+            echo "✅ Deployment Successful!"
+        env:
+          # 将 GitHub Secrets 映射到上面的 envs 列表里
+          COOKIE_BOOK118: ${{ secrets.COOKIE_BOOK118 }}
+          COOKIE_RENREN1: ${{ secrets.COOKIE_RENREN1 }}
+          COOKIE_RENREN2: ${{ secrets.COOKIE_RENREN2 }}
