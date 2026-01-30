@@ -1,195 +1,198 @@
 import os
 import time
 import logging
-import random
-import sys
-import shutil
-import threading
-import subprocess
-import json
-import requests
-import urllib.parse
 import undetected_chromedriver as uc
-from selenium.webdriver.common.by import By 
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
-# ================= 配置区域 (请修改这里) =================
-# 【TODO: 请将 user123/my-doc-reader 替换为你真实的新仓库地址】
-REPO_PATH = "wh1813/my-doc-reader" 
-
-# 1. 网址列表的 GitHub Raw 地址
-REMOTE_URLS_PATH = f"https://raw.githubusercontent.com/{REPO_PATH}/main/urls.txt"
-
-# 2. 节点列表的 GitHub Raw 地址
-REMOTE_XRAY_PATH = f"https://raw.githubusercontent.com/{REPO_PATH}/main/xray.txt"
-
-# 3. 每访问多少个网页切换一次 IP
-RESTART_INTERVAL = 50
-# ========================================================
-
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler(sys.stdout)]
-)
-
-# --- 模块1: VLESS 链接解析器 ---
-def parse_vless(url):
-    try:
-        if not url.startswith("vless://"): return None
-        main_part = url.split("://")[1].split("?")[0].split("#")[0]
-        query_part = url.split("?")[1].split("#")[0] if "?" in url else ""
-        user_info, host_port = main_part.split("@")
-        host, port = host_port.split(":")
-        params = dict(urllib.parse.parse_qsl(query_part))
-        return {
-            "uuid": user_info, "address": host, "port": int(port),
-            "type": params.get("type", "tcp"), "security": params.get("security", "none"),
-            "sni": params.get("sni", ""), "path": params.get("path", "/"),
-            "host": params.get("host", ""), "fp": params.get("fp", "")
-        }
-    except Exception as e:
-        return None
-
-# --- 模块2: 代理服务管理 (Xray) ---
-def check_proxy_connectivity():
-    try:
-        proxies = {"http": "http://127.0.0.1:10808", "https": "http://127.0.0.1:10808"}
-        r = requests.get("https://www.baidu.com", proxies=proxies, timeout=5)
-        if r.status_code == 200: return True
-    except: return False
-    return False
-
-def start_xray_with_node(node_url):
-    node = parse_vless(node_url)
-    if not node: return False
-    
-    config = {
-        "log": {"loglevel": "error"},
-        "inbounds": [{"port": 10808, "listen": "127.0.0.1", "protocol": "http", "settings": {"udp": True}}],
-        "outbounds": [{
-            "protocol": "vless",
-            "settings": {
-                "vnext": [{"address": node["address"], "port": node["port"], "users": [{"id": node["uuid"], "encryption": "none"}]}]
-            },
-            "streamSettings": {
-                "network": node["type"], "security": node["security"],
-                "tlsSettings": {"serverName": node["sni"], "fingerprint": node["fp"]} if node["security"] == "tls" else None,
-                "wsSettings": {"path": node["path"], "headers": {"Host": node["host"]}} if node["type"] == "ws" else None
-            }
-        }]
-    }
-    with open("config.json", "w") as f: json.dump(config, f)
-    subprocess.run("pkill -9 -f xray", shell=True, stderr=subprocess.DEVNULL)
-    time.sleep(1)
-    
-    try:
-        subprocess.Popen(["xray", "-c", "config.json"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(2)
-        if check_proxy_connectivity():
-            logging.info(f"    -> [节点切换成功] 目标: {node['address']}")
-            return True
-        else:
-            return False
-    except: return False
-
-def rotate_proxy():
-    if not os.path.exists("xray.txt"): return False
-    with open("xray.txt", "r") as f:
-        nodes = [line.strip() for line in f if line.strip() and not line.startswith("#")]
-    if not nodes: return False
-    random.shuffle(nodes)
-    for node_url in nodes:
-        if start_xray_with_node(node_url): return True
-    return False
-
-# --- 模块3: 自动更新 ---
-def update_remote_files():
-    files = {"urls.txt": REMOTE_URLS_PATH, "xray.txt": REMOTE_XRAY_PATH}
-    for filename, url in files.items():
-        try:
-            r = requests.get(url, timeout=10)
-            if r.status_code == 200:
-                with open(filename, "w", encoding="utf-8") as f: f.write(r.text)
-                logging.info(f"✅ {filename} 更新成功")
-        except: pass
-
-# --- 模块4: 浏览器配置 ---
-def force_kill_chrome():
-    subprocess.run("pkill -9 -f chrome", shell=True, stderr=subprocess.DEVNULL)
-    subprocess.run("pkill -9 -f undetected_chromedriver", shell=True, stderr=subprocess.DEVNULL)
+# 设置日志
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 
 def get_driver():
-    force_kill_chrome()
-    data_dir = "/tmp/chrome_user_data"
-    if os.path.exists(data_dir): shutil.rmtree(data_dir, ignore_errors=True)
     options = uc.ChromeOptions()
-    options.add_argument("--headless=new")
+    # 生产环境/GitHub Actions 请务必开启 headless
+    options.add_argument("--headless=new") 
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
-    options.add_argument(f"--user-data-dir={data_dir}")
-    options.add_argument("--ignore-certificate-errors")
-    options.add_argument("--proxy-server=http://127.0.0.1:10808")
+    
+    driver = uc.Chrome(options=options, version_main=144, use_subprocess=True)
+    return driver
+
+# ==================== Book118 爬虫 (基于已验证的 HTML) ====================
+def crawl_book118(driver):
+    urls = []
+    base_domain = "https://max.book118.com"
+    logging.info(">>> [Book118] 开始抓取...")
+
     try:
-        driver = uc.Chrome(options=options, version_main=144, use_subprocess=True, headless=True)
-        driver.set_page_load_timeout(60)
-        return driver
-    except:
-        force_kill_chrome()
-        return None
+        # 1. 登录
+        driver.get("https://max.book118.com/")
+        cookie_str = os.environ.get("COOKIE_BOOK118")
+        if not cookie_str:
+            logging.error("❌ [Book118] 未配置 Cookie！")
+            return []
+        
+        driver.delete_all_cookies()
+        for item in cookie_str.split(';'):
+            if '=' in item:
+                k, v = item.strip().split('=', 1)
+                driver.add_cookie({'name': k.strip(), 'value': v.strip()})
+        
+        # 2. 访问新版后台
+        # 注意：这里使用你提供的新版后台地址
+        start_url = "https://max.book118.com/user_center_v1/doc/index/index.html#audited"
+        driver.get(start_url)
+        time.sleep(5) 
 
-# --- 主逻辑 ---
-def run_automation():
-    update_remote_files()
-    if subprocess.call("pgrep -f xray > /dev/null", shell=True) != 0:
-        if not rotate_proxy(): return 
-    if not os.path.exists("urls.txt"): return
-    with open("urls.txt", "r") as f: urls = [l.strip() for l in f if l.strip()]
+        # 3. 循环翻页
+        for page in range(1, 6): # 爬取前 5 页
+            logging.info(f"--- [Book118] 分析第 {page} 页 ---")
+            
+            # 等待列表加载 (防止网络慢导致抓空)
+            try:
+                WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "tr")))
+            except:
+                logging.warning("等待表格超时或页面为空")
+
+            # A. 分析当前页数据
+            rows = driver.find_elements(By.TAG_NAME, "tr")
+            found_count = 0
+            for row in rows:
+                try:
+                    # 获取点击量 (基于之前的 HTML: td.col-click)
+                    try:
+                        views_elm = row.find_element(By.CSS_SELECTOR, "td.col-click")
+                        views_text = views_elm.text.strip()
+                        if "万" in views_text:
+                            views = float(views_text.replace("万", "")) * 10000
+                        else:
+                            views = int(views_text)
+                    except:
+                        continue # 没找到点击量，可能是表头
+                    
+                    # 筛选点击量 < 15
+                    if views < 15:
+                        # 获取链接 (基于之前的 HTML: td.col-title a)
+                        title_elm = row.find_element(By.CSS_SELECTOR, "td.col-title a")
+                        link = title_elm.get_attribute("href")
+                        
+                        # 补全链接
+                        if link and "http" not in link: 
+                            link = base_domain + link
+                        
+                        if link:
+                            urls.append(link)
+                            logging.info(f"✅ [Book118] 捕获: {link}")
+                            found_count += 1
+                except:
+                    continue
+
+            # B. 执行翻页 (基于你提供的 HTML)
+            # HTML: <a href="/user_center_v1/...">下一页</a>
+            try:
+                # 使用 XPath 精准查找文字为"下一页"的链接
+                next_btn = driver.find_element(By.XPATH, "//a[contains(text(), '下一页')]")
+                
+                # 检查是否还有下一页 (如果 href 是当前页或者 javascript:; 可能就是没了)
+                href = next_btn.get_attribute("href")
+                if not href or "javascript" in href:
+                    logging.info("没有下一页了")
+                    break
+                    
+                logging.info("正在点击下一页...")
+                # 直接点击比 get(href) 更稳，因为它能保持 Session 上下文
+                driver.execute_script("arguments[0].click();", next_btn)
+                time.sleep(5) # 等待新页面加载
+            except Exception as e:
+                logging.info(f"未找到下一页按钮，爬取结束。")
+                break
+
+    except Exception as e:
+        logging.error(f"❌ [Book118] 异常: {e}")
+
+    return urls
+
+# ==================== RenrenDoc 爬虫 (基于已验证的翻页) ====================
+def crawl_renrendoc(driver):
+    urls = []
+    logging.info(">>> [RenrenDoc] 开始抓取...")
+
+    try:
+        # 1. 登录
+        driver.get("https://www.renrendoc.com/")
+        cookie_str = os.environ.get("COOKIE_RENRENDOC")
+        if not cookie_str:
+            logging.warning("⚠️ [RenrenDoc] 未配置 Cookie，跳过。")
+            return []
+        
+        driver.delete_all_cookies()
+        for item in cookie_str.split(';'):
+            if '=' in item:
+                k, v = item.strip().split('=', 1)
+                driver.add_cookie({'name': k.strip(), 'value': v.strip()})
+
+        # 2. 访问后台
+        start_url = "https://www.renrendoc.com/renrendoc_v1/MCBookList/published.html"
+        driver.get(start_url)
+        time.sleep(5)
+
+        # 3. 循环翻页
+        for page in range(1, 6):
+            logging.info(f"--- [RenrenDoc] 分析第 {page} 页 ---")
+            
+            # A. 分析当前页数据 (暂时使用通用抓取，因缺少列表 HTML)
+            # 策略：抓取页面主要内容区的所有文档链接
+            # 人人文档的链接特征通常包含 /p-
+            links = driver.find_elements(By.TAG_NAME, "a")
+            found_count = 0
+            for link in links:
+                try:
+                    href = link.get_attribute("href")
+                    # 简单筛选：必须包含 renrendoc.com 且包含文档 ID 特征
+                    if href and "renrendoc.com/p-" in href:
+                        urls.append(href)
+                        found_count += 1
+                        # logging.info(f"✅ [RenrenDoc] 捕获: {href}") # 链接太多可以关掉日志
+                except:
+                    continue
+            logging.info(f"    本页提取到 {found_count} 个潜在文档链接")
+
+            # B. 执行翻页 (基于你提供的 HTML)
+            # HTML: <a class="paginator" href="...?page=7">下一页</a>
+            try:
+                # 使用 CSS 选择器定位 class="paginator" 且文字包含"下一页"
+                # 这里用 XPATH 最稳，因为 paginator 可能有多个(上一页/页码)
+                next_btn = driver.find_element(By.XPATH, "//a[contains(@class, 'paginator') and contains(text(), '下一页')]")
+                
+                logging.info("点击下一页...")
+                driver.execute_script("arguments[0].click();", next_btn)
+                time.sleep(4)
+            except:
+                logging.info("未找到下一页按钮，爬取结束。")
+                break
+
+    except Exception as e:
+        logging.error(f"❌ [RenrenDoc] 异常: {e}")
+    
+    return urls
+
+# ==================== 主程序 ====================
+def save_urls(urls):
     if not urls: return
-
-    driver = get_driver()
-    if not driver: return
-    logging.info(f">>> 任务开始，共 {len(urls)} 个链接")
-
-    for index, url in enumerate(urls, 1):
-        try:
-            if not url.startswith('http'): url = 'https://' + url
-            if index % RESTART_INTERVAL == 0:
-                try: driver.quit()
-                except: pass
-                if not rotate_proxy(): break 
-                driver = get_driver()
-                if not driver: break
-
-            logging.info(f"[{index}/{len(urls)}] 访问: {url}")
-            driver.get(url)
-            sleep_time = random.uniform(5, 8)
-            time.sleep(sleep_time)
-            logging.info(f"    -> 成功 (停留 {sleep_time:.1f}s)")
-        except:
-            try: driver.quit()
-            except: pass
-            rotate_proxy()
-            driver = get_driver()
-            if not driver: break
-    try: driver.quit()
-    except: pass
-    force_kill_chrome()
-
-# --- 保活 Web Server ---
-class HealthCheckHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.wfile.write(b"Alive")
-    def log_message(self, format, *args): pass
+    urls = list(set(urls)) # 去重
+    with open("urls.txt", "w", encoding="utf-8") as f:
+        for url in urls:
+            f.write(url + "\n")
+    logging.info(f"🎉 任务完成！urls.txt 已更新，共 {len(urls)} 个链接。")
 
 if __name__ == "__main__":
-    threading.Thread(target=HTTPServer(('0.0.0.0', 80), HealthCheckHandler).serve_forever, daemon=True).start()
-    update_remote_files()
-    if not rotate_proxy(): time.sleep(60)
-    while True:
-        try: run_automation()
+    driver = get_driver()
+    if driver:
+        all_urls = []
+        all_urls.extend(crawl_book118(driver))
+        all_urls.extend(crawl_renrendoc(driver))
+        save_urls(all_urls)
+        try: driver.quit()
         except: pass
-
-        time.sleep(600)
