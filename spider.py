@@ -14,10 +14,11 @@ def get_driver():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-gpu")
     options.add_argument("--window-size=1920,1080")
+    # 强制指定版本 144
     driver = uc.Chrome(options=options, version_main=144, use_subprocess=True)
     return driver
 
-# ==================== Book118 逻辑 ====================
+# ==================== Book118 逻辑 (保持不变) ====================
 def crawl_book118(driver):
     urls = []
     base_domain = "https://max.book118.com"
@@ -40,14 +41,11 @@ def crawl_book118(driver):
         driver.get(target_url)
         time.sleep(5)
 
-        # 用于防重：记录上一页找到的第一个链接，如果当前页第一个链接和上一页一样，说明没翻过去
         last_page_first_link = None
         
-        # 扩大翻页数到 100 (约2000条)
         for page in range(1, 101):
-            logging.info(f"   正在分析第 {page} 页...")
-            try:
-                WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "tr")))
+            logging.info(f"   [Book118] 分析第 {page} 页...")
+            try: WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "tr")))
             except: pass
 
             rows = driver.find_elements(By.TAG_NAME, "tr")
@@ -55,58 +53,46 @@ def crawl_book118(driver):
             
             for row in rows:
                 try:
-                    # 获取点击量
                     try:
                         views_text = row.find_element(By.CSS_SELECTOR, "td.col-click").text.strip()
-                        if "万" in views_text:
-                            views = float(views_text.replace("万", "")) * 10000
-                        else:
-                            views = int(views_text)
+                        if "万" in views_text: views = float(views_text.replace("万", "")) * 10000
+                        else: views = int(views_text)
                     except: continue
 
                     if views < 15:
                         link_elm = row.find_element(By.CSS_SELECTOR, "td.col-title a")
                         link = link_elm.get_attribute("href")
                         if link and "http" not in link: link = base_domain + link
-                        if link: 
-                            current_page_links.append(link)
+                        if link: current_page_links.append(link)
                 except: continue
 
-            # === 防重/翻页失败检测 ===
             if not current_page_links:
-                logging.info("⚠️ 本页未找到有效链接，停止翻页")
-                break
-                
-            current_first_link = current_page_links[0]
-            if current_first_link == last_page_first_link:
-                logging.info("🛑 检测到重复内容（翻页未生效或已达限制），停止抓取")
-                break
+                logging.info("   本页无符合条件的低热度链接")
+                if not rows: break # 连行都没找到，说明可能出错了或到底了
             
-            last_page_first_link = current_first_link
+            # 防重
+            if current_page_links and current_page_links[0] == last_page_first_link:
+                logging.info("🛑 检测到重复页面，停止")
+                break
+            if current_page_links: last_page_first_link = current_page_links[0]
+            
             urls.extend(current_page_links)
-            logging.info(f"   第 {page} 页捕获 {len(current_page_links)} 个链接")
+            logging.info(f"      -> 捕获 {len(current_page_links)} 个低热度链接")
 
-            # 执行翻页
             try:
                 next_btn = driver.find_element(By.XPATH, "//a[contains(text(), '下一页')]")
                 href = next_btn.get_attribute("href")
-                # 如果 href 为空或者是 javascript:; 说明是最后一页
-                if not href or "javascript" in href: 
-                    logging.info("已到达最后一页")
-                    break
-                    
+                if not href or "javascript" in href: break
                 driver.execute_script("arguments[0].click();", next_btn)
                 time.sleep(4)
-            except: 
-                logging.info("未找到下一页按钮，结束")
-                break
+            except: break
 
     except Exception as e:
         logging.error(f"❌ [Book118] 出错: {e}")
     
     return urls
 
-# ==================== RenrenDoc 逻辑 (多账号 + 防重) ====================
+# ==================== RenrenDoc 逻辑 (深度修复版) ====================
 def crawl_renrendoc_single(driver, cookie_name, cookie_value):
     urls = []
     if not cookie_value: return []
@@ -125,35 +111,76 @@ def crawl_renrendoc_single(driver, cookie_name, cookie_value):
 
         last_page_links_set = set()
 
-        for page in range(1, 101): # 扩大范围
+        for page in range(1, 101):
             logging.info(f"   [{cookie_name}] 分析第 {page} 页...")
             
-            links = driver.find_elements(By.TAG_NAME, "a")
+            # 1. 查找所有表格行 (TR)
+            rows = driver.find_elements(By.TAG_NAME, "tr")
+            if not rows:
+                logging.warning("   ⚠️ 未找到表格行，尝试查找列表容器...")
+                # 备用方案：有些页面可能是 div 列表，这里保留扩充空间
+            
             current_page_found = []
             
-            for link in links:
+            for row in rows:
                 try:
-                    href = link.get_attribute("href")
-                    if href and "renrendoc.com/p-" in href:
-                        current_page_found.append(href)
-                except: continue
+                    # 2. 在每一行中寻找 "数字/数字" 格式的单元格
+                    # 获取该行所有单元格
+                    cols = row.find_elements(By.TAG_NAME, "td")
+                    
+                    is_low_view = False
+                    link_found = None
+                    
+                    for col in cols:
+                        text = col.text.strip()
+                        
+                        # --- 核心识别逻辑 ---
+                        # 检查是否包含 "/" 且被分割的两部分都是数字
+                        if "/" in text:
+                            parts = text.split("/")
+                            if len(parts) == 2 and parts[0].isdigit():
+                                views = int(parts[0]) # 提取斜杠左边的浏览量
+                                
+                                if views < 15:
+                                    is_low_view = True
+                                else:
+                                    # 如果浏览量 >= 15，这行直接跳过，不用找链接了
+                                    break 
+                        
+                        # 同时在这个循环里找链接 (通常在标题列)
+                        # 为了保险，我们找该行内所有含有 "renrendoc.com/p-" 的链接
+                        if not link_found:
+                            try:
+                                # 只找这一个单元格里的链接
+                                sub_links = col.find_elements(By.TAG_NAME, "a")
+                                for sub_link in sub_links:
+                                    href = sub_link.get_attribute("href")
+                                    if href and ("renrendoc.com/p-" in href or "renrendoc.com/paper/" in href):
+                                        link_found = href
+                                        break
+                            except: pass
+
+                    # 3. 只有当：是低浏览量 AND 找到了链接，才加入列表
+                    if is_low_view and link_found:
+                        current_page_found.append(link_found)
+                        
+                except Exception as row_e:
+                    continue
             
-            # === 防重检测 ===
+            # === 防重与翻页 ===
             current_set = set(current_page_found)
-            if not current_set:
-                logging.info("本页无数据，停止")
+            if not current_page_found and not rows:
+                logging.info("   本页无数据，停止")
                 break
                 
-            # 如果当前页找到的所有链接，都已经在上一页出现过（说明页面没变）
-            # 或者当前页内容和上一页完全一样
-            if current_set == last_page_links_set:
-                logging.info(f"🛑 [{cookie_name}] 检测到重复页面（已达限制），停止")
+            if current_set and current_set == last_page_links_set:
+                logging.info(f"🛑 [{cookie_name}] 页面重复，停止")
                 break
                 
             last_page_links_set = current_set
             urls.extend(current_page_found)
+            logging.info(f"      -> 捕获 {len(current_page_found)} 个低热度链接")
             
-            # 翻页
             try:
                 next_btn = driver.find_element(By.XPATH, "//a[contains(@class, 'paginator') and contains(text(), '下一页')]")
                 driver.execute_script("arguments[0].click();", next_btn)
@@ -169,6 +196,7 @@ def crawl_renrendoc_single(driver, cookie_name, cookie_value):
 
 def crawl_renrendoc_all(driver):
     all_renren_urls = []
+    # 优先从环境变量读，如果本地测试没配置环境变量，可以手动填
     renren_keys = ["COOKIE_RENREN1", "COOKIE_RENREN2"]
     
     for key in renren_keys:
@@ -182,25 +210,31 @@ def crawl_renrendoc_all(driver):
 
 # ==================== 主程序 ====================
 if __name__ == "__main__":
+    logging.info("🚀 启动智能筛选爬虫 (仅抓取阅读量 < 15)...")
+    
     driver = get_driver()
     if driver:
         final_urls = []
         
         # 1. Book118
         final_urls.extend(crawl_book118(driver))
+        time.sleep(3)
         
-        # 2. Renren (Renren1 + Renren2)
+        # 2. Renren
         final_urls.extend(crawl_renrendoc_all(driver))
         
-        # 3. 去重并保存
+        # 3. 保存
+        # 注意：这里是覆盖写入 ('w')，这意味着每次生成都是全新的“待处理名单”
         final_urls = list(set(final_urls))
+        
         if final_urls:
             with open("urls.txt", "w", encoding="utf-8") as f:
                 for url in final_urls:
                     f.write(url + "\n")
-            logging.info(f"🎉 抓取完成！共更新 {len(final_urls)} 个链接")
+            logging.info(f"🎉 抓取完成！共生成 {len(final_urls)} 个【低热度】链接")
+            logging.info("💾 结果已保存至 urls.txt，请推送到 GitHub")
         else:
-            logging.info("⚠️ 本次未抓取到任何链接")
+            logging.warning("⚠️ 本次未抓取到任何 < 15 阅读量的链接 (可能是都刷上去了，或者Cookie失效)")
             
         try: driver.quit()
         except: pass
