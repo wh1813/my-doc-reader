@@ -65,7 +65,7 @@ def task_book118(cookie_str):
 
         last_page_first_link = None
         
-        for page in range(1, 25): 
+        for page in range(1, 20): 
             logging.info(f"   [Book118] 正在分析第 {page} 页...")
             try:
                 WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.CSS_SELECTOR, "a.title")))
@@ -137,7 +137,7 @@ def task_renren(account_name, cookie_value):
 
         last_page_links_set = set()
 
-        for page in range(1, 25): 
+        for page in range(1, 20): 
             logging.info(f"   [{account_name}] 正在分析第 {page} 页...")
             
             links = driver.find_elements(By.TAG_NAME, "a")
@@ -212,4 +212,5 @@ if __name__ == "__main__":
         
     # 保持运行一分钟方便看日志
     time.sleep(60)
+
 
