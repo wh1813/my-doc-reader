@@ -7,7 +7,6 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 # ================= 配置区域 (从环境变量读取) =================
-# 如果环境变量没配置，为了防止报错，给个空字符串
 COOKIE_BOOK118 = os.environ.get("COOKIE_BOOK118", "")
 COOKIE_RENREN1 = os.environ.get("COOKIE_RENREN1", "")
 COOKIE_RENREN2 = os.environ.get("COOKIE_RENREN2", "")
@@ -26,7 +25,8 @@ def get_driver():
     
     logging.info("🚀 正在启动 Chrome 浏览器 (Cloud Mode)...")
     try:
-        driver = uc.Chrome(options=options, use_subprocess=True)
+        # 【关键修改】强制指定 version_main=144，解决 Docker 内版本冲突
+        driver = uc.Chrome(options=options, version_main=144, use_subprocess=True)
         return driver
     except Exception as e:
         logging.error(f"❌ 浏览器启动失败: {e}")
@@ -210,4 +210,5 @@ if __name__ == "__main__":
     else:
         logging.warning("⚠️ 未抓取到任何链接，请检查Cookie是否过期")
         
-    # 保持运行一
+    # 保持运行一分钟方便看日志
+    time.sleep(60)
